@@ -60,20 +60,26 @@ class VideoRequest(CamelModel):
 
     :ivar external: Признак или URL внешнего источника видео.
     :vartype external: str | bool | None
-    :ivar cache: Использовать ли кеш.
+    :ivar cache: Использовать ли кеш. Отсутствует у внешнего видео.
     :vartype cache: bool
-    :ivar url: URL видео.
-    :vartype url: str
+    :ivar url: URL видео (прямой, либо внешний из ``EXTERNAL``).
+    :vartype url: str | None
     """
 
     external: str | bool | None = Field(default=None, alias="EXTERNAL")
-    cache: bool
-    url: str
+    # cw-патч: у ВНЕШНЕГО видео MAX присылает только {"EXTERNAL": "<url>"} — ни
+    # `cache`, ни `url` в ответе нет. Оба поля были required → ValidationError
+    # («cache Field required»), и видео молча терялось (наблюдали на проде 14.07.2026).
+    cache: bool = False
+    url: str | None = None
 
     @model_validator(mode="before")
     @classmethod
     def unwrap_dynamic_url(cls, value: Any) -> Any:
-        """Нормализует динамический ключ URL в поле ``url``.
+        """Нормализует URL видео в поле ``url``.
+
+        MAX отдаёт прямой URL под ДИНАМИЧЕСКИМ ключом качества (``MP4_1080`` и т.п.),
+        а у внешнего видео — только под ``EXTERNAL``.
 
         :param value: Значение, переданное в валидатор модели.
         :type value: Any
@@ -83,8 +89,36 @@ class VideoRequest(CamelModel):
         if not isinstance(value, dict) or "url" in value:
             return value
 
+        # 1) Прямой URL: берём максимальное доступное MP4-качество.
+        # Строгая проверка ключа (MP4_<число>) и типа значения — иначе в `url`
+        # попадал ЛЮБОЙ посторонний ключ, включая списки вроде
+        # {"servers": ["maxvdNNN.okcdn.ru"]} → ValidationError (upstream issue #70).
+        mp4: list[tuple[int, str]] = []
         for key, url in value.items():
-            if key not in ("EXTERNAL", "cache"):
-                return {**value, "url": url}
+            if not isinstance(key, str) or not isinstance(url, str):
+                continue
+            normalized = key.upper()
+            if not normalized.startswith("MP4_"):
+                continue
+            try:
+                quality = int(normalized.removeprefix("MP4_"))
+            except ValueError:
+                continue
+            if quality > 0:
+                mp4.append((quality, url))
+        if mp4:
+            return {**value, "url": max(mp4, key=lambda item: item[0])[1]}
+
+        # 2) Legacy-ключ прямого URL.
+        legacy = value.get("dynamicUrl", value.get("dynamic_url"))
+        if isinstance(legacy, str) and legacy:
+            return {**value, "url": legacy}
+
+        # 3) cw-патч: ВНЕШНЕЕ видео (ok.ru и пр.) — сам EXTERNAL и есть ссылка.
+        # Без этого url остаётся None, и видео не скачивается, хотя URL был прислан.
+        # (`external` бывает и bool-флагом — тогда это не ссылка, пропускаем.)
+        external = value.get("EXTERNAL")
+        if isinstance(external, str) and external:
+            return {**value, "url": external}
 
         return value
