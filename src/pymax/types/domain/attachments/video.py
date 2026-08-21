@@ -62,7 +62,8 @@ class VideoRequest(CamelModel):
     :vartype external: str | bool | None
     :ivar cache: Использовать ли кеш.
     :vartype cache: bool
-    :ivar url: Прямой URL видео или ``None`` для внешнего видео.
+    :ivar url: Прямой URL видео, либо внешний из ``EXTERNAL``; ``None``,
+        если ссылки нет вовсе.
     :vartype url: str | None
     """
 
@@ -107,5 +108,15 @@ class VideoRequest(CamelModel):
         legacy_url = value.get("dynamicUrl", value.get("dynamic_url"))
         if isinstance(legacy_url, str):
             return {**value, "url": legacy_url}
+
+        # ВНЕШНЕЕ видео (ok.ru и пр.): прямого URL нет вовсе — сам ``EXTERNAL`` и
+        # есть ссылка. Без этой ветви ``url`` остаётся ``None``, и видео молча не
+        # скачивается, хотя ссылка была прислана. До 2.4.0 такой ответ ещё и ронял
+        # парсинг (``cache``/``url`` были обязательными) — краш upstream закрыл,
+        # а достижимость внешнего видео нет.
+        # ``external`` бывает и bool-флагом — тогда это не ссылка, пропускаем.
+        external = value.get("EXTERNAL")
+        if isinstance(external, str) and external:
+            return {**value, "url": external}
 
         return value
